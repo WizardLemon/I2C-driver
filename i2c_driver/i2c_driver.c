@@ -20,8 +20,6 @@
 
 MODULE_LICENSE("Dual BSD/GPL");
 
-/* Za projekat je koriscen gpio_driver.c fajl iz vezbe 7 */
-
 /* GPIO registers base address. */
 #define BCM2708_PERI_BASE   (0x3F000000)
 #define GPIO_BASE           (BCM2708_PERI_BASE + 0x200000)
@@ -97,13 +95,17 @@ static int i2c_driver_release(struct inode *, struct file *);
 static ssize_t i2c_driver_read(struct file *, char *buf, size_t , loff_t *);
 static ssize_t i2c_driver_write(struct file *, const char *buf, size_t , loff_t *);
 
+void unmapRegisters(void);
+int SendData(unsigned int bytes);
+int ReceiveData(unsigned int bytes);
+
 /* Structure that declares the usual file access functions. */
 struct file_operations i2c_driver_fops =
 {
     open    :   i2c_driver_open,
     release :   i2c_driver_release,
     read    :   i2c_driver_read,
-     write   :   i2c_driver_write
+    write   :   i2c_driver_write
 };
 
 /* Declaration of the init and exit functions. */
@@ -117,8 +119,8 @@ int i2c_driver_major;
 
 /* Buffer to store data. */
 #define BUF_LEN 80
-char *i2c_driver_buffer;
-char *i2c_data_buffer;
+static char i2c_driver_buffer[BUF_LEN];
+static char data_buffer[BUF_LEN];
 
 /* Register addresses */
 void *virt_reg_c;
@@ -126,9 +128,6 @@ void *virt_reg_s;
 void *virt_reg_dlen;
 void *virt_reg_a;
 void *virt_reg_fifo;
-void *virt_reg_div;
-void *virt_reg_del;
-void *virt_reg_clkt;
 
 
 /*
@@ -290,7 +289,7 @@ void SetGpioPinDirection(char pin, char function)
  *  4. Map BSC1 Physical address space to virtual address
  *  5. Initialize GPIO pins
  */
-int i2c_driver_init(void)			// TODO : add goto for failure cases
+int i2c_driver_init(void)
 {
     int result;
 
@@ -314,29 +313,45 @@ int i2c_driver_init(void)			// TODO : add goto for failure cases
 		return -1;
     }
     
-    /* Allocating memory for the buffers. */
-    i2c_driver_buffer = kmalloc(BUF_LEN, GFP_KERNEL);
-    i2c_data_buffer = kmalloc(BUF_LEN, GFP_KERNEL);
-    
-    if (i2c_driver_buffer == NULL || i2c_data_buffer == NULL)
-    {
-        printk(KERN_INFO "Unable to allocate memory for buffers\n");
-        return -1;
-    }
-    
     /* Initialize data buffers. */
     memset(i2c_driver_buffer, 0, BUF_LEN);
-    memset(i2c_data_buffer, 0, BUF_LEN);
+    memset(data_buffer, 0, BUF_LEN);
     
 	/* Map BSC1 Physical address space to virtual address. */
 	virt_reg_c = ioremap(BSC1_REG_C, 4);
+	if(!virt_reg_c)
+    {
+        result = -ENOMEM;
+        goto fail_no_virt_mem;
+    }
+    
 	virt_reg_s = ioremap(BSC1_REG_S, 4);
+	if(!virt_reg_s)
+    {
+        result = -ENOMEM;
+        goto fail_no_virt_mem;
+    }
+    
 	virt_reg_dlen = ioremap(BSC1_REG_DLEN, 4);
+	if(!virt_reg_dlen)
+    {
+        result = -ENOMEM;
+        goto fail_no_virt_mem;
+    }
+    
 	virt_reg_a = ioremap(BSC1_REG_A, 4);
+	if(!virt_reg_a)
+    {
+        result = -ENOMEM;
+        goto fail_no_virt_mem;
+    }
+    
 	virt_reg_fifo = ioremap(BSC1_REG_FIFO, 4);
-	virt_reg_div = ioremap(BSC1_REG_DIV, 4);
-	virt_reg_del = ioremap(BSC1_REG_DEL, 4);
-	virt_reg_clkt = ioremap(BSC1_REG_CLKT, 4);
+	if(!virt_reg_fifo)
+    {
+        result = -ENOMEM;
+        goto fail_no_virt_mem;
+    }
 
 	/* Setting pull up, and pin alt functions. */
 	SetGpioPinDirection(GPIO_02, GPIO_DIRECTION_ALT0);
@@ -346,6 +361,15 @@ int i2c_driver_init(void)			// TODO : add goto for failure cases
 
 
     return 0;
+    
+fail_no_virt_mem:
+	/* Unmap GPIO Physical address space. */
+	unmapRegisters();
+	
+	/* Freeing the major number. */
+	unregister_chrdev(i2c_driver_major, "i2c_driver");
+	
+	return result;
 }
 
 
@@ -376,7 +400,7 @@ int SendData(unsigned int bytes)
 	/* Write to FIFO register from data buffer. */
 	for(i = 0; i < bytes; i++)
 	{
-		iowrite32(i2c_data_buffer[i], virt_reg_fifo); 
+		iowrite32(data_buffer[i], virt_reg_fifo); 
 	} 
 	
 	/* Start transfer by setting 8th bit in Control register to 1. */
@@ -389,11 +413,13 @@ int SendData(unsigned int bytes)
 	{							  		// While loop prevents further progress until the transfer is finished.
 		status = ioread32(virt_reg_s);	// Keep reading status register until transfer is complete.
 		
+		/*
 										// OPTION A FOR INTERRUPT
 		if(!(status & 0x00000001))		// First bit indicates if there is a transfer in progress.
 		{								// If the transfer is not complete, and there is no transfer in progress,
 			return -1;					// the while loop is interrupted and we return a -1 to signify an error.
 		}
+		*/
 		/*
 										// OPTION B FOR INTERRUPT
 		if(status & 0x00000200)			// Slave has held the SCL signal low (clock stretching)
@@ -420,10 +446,7 @@ int ReceiveData(unsigned int bytes)
 	int status;
 	int data;
 	
-	for(i = 0; i < BUF_LEN; i++)		// Empty the I2C data buffer.
-	{
-		i2c_data_buffer[i] = '\0';
-	}
+	memset(i2c_driver_buffer, '\0', BUF_LEN);
 	
 	/* Clear the Status register so we can get an accurate reading after completion of transfer. */
 	iowrite32(0x00000302, virt_reg_s); 	// 0b 0000 0000 0000 0000 0000 0011 0000 0010
@@ -445,12 +468,13 @@ int ReceiveData(unsigned int bytes)
 	while(!(status & 0x00000002)) 		// Once the transfer is complete the 2nd bit will be set to 1 (0010 or 2 in hex).
 	{							  		// While loop prevents further progress until the transfer is finished.
 		status = ioread32(virt_reg_s);	// Keep reading status register until transfer is complete.
-		
+		/*
 										// OPTION A FOR INTERRUPT
 		if(!(status & 0x00000001))		// First bit indicates if there is a transfer in progress.
 		{								// If the transfer is not complete, and there is no transfer in progress,
 			return -1;					// the while loop is interrupted and we return a -1 to signify an error.
 		}
+		*/
 		/*
 										// OPTION B FOR INTERRUPT
 		if(status & 0x00000200)			// Slave has held the SCL signal low (clock stretching) (?)
@@ -466,7 +490,7 @@ int ReceiveData(unsigned int bytes)
 	while(!(status & 0x00000040)) 		// Once the FIFO register is empty the 7th bit will be set to 1 (0100 0000 or 0x40 in hex).
 	{
 		data = ioread32(virt_reg_fifo);
-		i2c_data_buffer[i] = data;
+		i2c_driver_buffer[i] = data;
 		++i;
 		if( i == bytes)
 		{
@@ -494,45 +518,7 @@ void i2c_driver_exit(void)
 	SetInternalPullUpDown(GPIO_03, PULL_NONE);
 	
     /* Unmap i2c Physical address space. */
-    if (virt_reg_c)
-    {
-        iounmap(virt_reg_c);
-    }
-    
-    if (virt_reg_s)
-    {
-        iounmap(virt_reg_s);
-    }
-    
-    if (virt_reg_dlen)
-    {
-        iounmap(virt_reg_dlen);
-    }
-    
-    if (virt_reg_a)
-    {
-        iounmap(virt_reg_a);
-    }
-    
-    if (virt_reg_fifo)
-    {
-        iounmap(virt_reg_fifo);
-    }
-    
-    if (virt_reg_div)
-    {
-        iounmap(virt_reg_div);
-    }
-    
-    if (virt_reg_del)
-    {
-        iounmap(virt_reg_del);
-    }
-    
-    if (virt_reg_clkt)
-    {
-        iounmap(virt_reg_clkt);
-    }
+    unmapRegisters();
 	
 	/* Free memory */
 	release_mem_region(BSC1_BASE, 0x20);
@@ -607,6 +593,10 @@ static ssize_t i2c_driver_read(struct file *filp, char *buf, size_t len, loff_t 
  *   f_pos - a position of where to start writing in the file;
  *  Operation:
  *   The function copy_from_user transfers the data from user space to kernel space.
+ *   Function reads from user space into the i2c_driver_buffer and depending on the
+ *   first element executes 3 kinds of operations, or calls an interupt if an error
+ *   has occured. The second element is the number of elements to be read after the
+ *   first two.
  */
 static ssize_t i2c_driver_write(struct file *filp, const char *buf, size_t len, loff_t *f_pos)
 {
@@ -635,7 +625,7 @@ static ssize_t i2c_driver_write(struct file *filp, const char *buf, size_t len, 
 
 			for(i = 2; i < 2+n; i++)			// Shifted for 2 because the first two bytes are informational.
 			{									
-				i2c_data_buffer[i - 2] = i2c_driver_buffer[i];
+				data_buffer[i - 2] = i2c_driver_buffer[i];
 			}
 
 			if(SendData((unsigned int)n) < 0)
@@ -656,4 +646,32 @@ static ssize_t i2c_driver_write(struct file *filp, const char *buf, size_t len, 
 		}
 		return len;
 	}
+}
+
+void unmapRegisters()
+{
+	if (virt_reg_c)
+    {
+        iounmap(virt_reg_c);
+    }
+    
+    if (virt_reg_s)
+    {
+        iounmap(virt_reg_s);
+    }
+    
+    if (virt_reg_dlen)
+    {
+        iounmap(virt_reg_dlen);
+    }
+    
+    if (virt_reg_a)
+    {
+        iounmap(virt_reg_a);
+    }
+    
+    if (virt_reg_fifo)
+    {
+        iounmap(virt_reg_fifo);
+    }
 }
