@@ -221,10 +221,10 @@ void SetInternalPullUpDown(char pin, PUD pull)
     addr = ioremap(gppud_base, 4);
     iowrite32(pull, addr);
 
-    /* Wait 150 cycles – this provides the required set-up time for the control signal */
+    /* Wait 150 cycles â€“ this provides the required set-up time for the control signal */
 
     /* Write to GPPUDCLK0/1 to clock the control signal into the GPIO pads you wish to
-       modify – NOTE only the pads which receive a clock will be modified, all others will
+       modify â€“ NOTE only the pads which receive a clock will be modified, all others will
        retain their previous state. */
     addr = ioremap(gppudclk_base, 4);
     tmp = ioread32(addr);
@@ -232,7 +232,7 @@ void SetInternalPullUpDown(char pin, PUD pull)
     tmp |= mask;
     iowrite32(tmp, addr);
 
-    /* Wait 150 cycles – this provides the required hold time for the control signal */
+    /* Wait 150 cycles â€“ this provides the required hold time for the control signal */
 
     /* Write to GPPUD to remove the control signal. */
     addr = ioremap(gppud_base, 4);
@@ -271,10 +271,10 @@ void SetGpioPinDirection(char pin, char function)
     addr = ioremap(GPFSELReg_base, 4);
     tmp = ioread32(addr);
     
-  	mask = ~(0b111 << (pin*3));
-  	tmp &= mask;
-  	
-  	mask = (function & 0b111) << (pin*3);
+	mask = ~(0b111 << (pin*3));
+	tmp &= mask;
+
+	mask = (function & 0b111) << (pin*3);
     tmp |= mask;
   	
     iowrite32(tmp, addr);
